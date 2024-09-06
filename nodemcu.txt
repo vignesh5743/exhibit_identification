@@ -1,0 +1,202 @@
+#include <WiFi.h>
+#include <ESP_Mail_Client.h>
+
+#define WIFI_SSID "karthi"
+#define WIFI_PASSWORD "123456789"
+
+#define SMTP_server "smtp.gmail.com"
+#define SMTP_Port 465
+
+#define sender_email "Kramkumar1113@gmail.com"
+#define sender_password "cgyiivhdcscdvqnv"
+
+#define Recipient_email_1 "ramkumark1113@gmail.com"
+#define Recipient_email_2 "ramkumark_bai25@mepcoeng.ac.in"
+#define Recipient_email_3 "descmnb@gmail.com"
+#define Recipient_email_4 "chandraprakashc_bai25@mepcoeng.ac.in"
+#define Recipient_email_5 "vishnusk_bai25@mepcoeng.ac.in"
+#define Recipient_email_6 "hariharanvignesh2003_bai25@mepcoeng.ac.in"
+
+#define CURRENT_THRESHOLD 0.90 // Threshold for current to trigger email alert
+#define VIBRATION_THRESHOLD 0.50 // Threshold for vibration to trigger email alert
+
+SMTPSession smtp;
+bool alertSent = false;
+
+const int currentSensorPin = 34;  // GPIO pin for current sensor
+const int vibrationSensorPin = 35; // GPIO pin for vibration sensor
+const int relayPin = 26;          // GPIO pin for relay module
+const int button1Pin = 25;        // GPIO pin for first push button
+const int button2Pin = 33;        // GPIO pin for second push button
+const int samples = 1000;         // Number of samples for averaging
+const float VCC = 3.3;            // Supply voltage of ESP32
+const float V_REF = VCC / 4095.0; // ADC reference voltage divided by resolution
+const float SENSOR_SENSITIVITY = 0.1; // Sensitivity of the ACS712-20A sensor in V/A
+
+float zeroCurrentOffset = 0; // Variable to store the zero-current offset
+bool relayState = false;     // Track the relay state
+
+int exhibitID = 1;  // Exhibit ID variable
+String ipAddress;   // Variable to store IP address
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(relayPin, OUTPUT);
+  digitalWrite(relayPin, LOW); // Ensure relay is off at start
+
+  pinMode(button1Pin, INPUT_PULLUP); // Configure first button pin
+  pinMode(button2Pin, INPUT_PULLUP); // Configure second button pin
+
+  Serial.print("Connecting...");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(200);
+  }
+
+  ipAddress = WiFi.localIP().toString();
+  Serial.println("\nWiFi connected.");
+  Serial.println("IP address: ");
+  Serial.println(ipAddress);
+  Serial.println();
+
+  // Change exhibit ID based on IP address
+  if (ipAddress == "192.168.1.100") {
+    exhibitID = 2;
+  } else if (ipAddress == "192.168.1.101") {
+    exhibitID = 3;
+  }
+
+  smtp.debug(1);
+  calibrateZeroCurrent(); // Perform calibration
+}
+
+// Function to calibrate zero current offset
+void calibrateZeroCurrent() {
+  float offsetSum = 0;
+  for (int i = 0; i < samples; i++) {
+    int sensorValue = analogRead(currentSensorPin);
+    float voltage = sensorValue * V_REF; // Convert ADC value to voltage
+    offsetSum += voltage;
+    delay(10); // Short delay for stability
+  }
+  zeroCurrentOffset = offsetSum / samples; // Average offset
+  Serial.print("Zero Current Offset: ");
+  Serial.println(zeroCurrentOffset, 3); // Print with 3 decimal places
+}
+
+// Function to measure RMS AC current
+float measureCurrentAC() {
+  float currentSum = 0;
+  for (int i = 0; i < samples; i++) {
+    int sensorValue = analogRead(currentSensorPin);
+    float voltage = sensorValue * V_REF; // Convert ADC value to voltage
+    float current = (voltage - zeroCurrentOffset) / SENSOR_SENSITIVITY; // Convert voltage to current
+    currentSum += current * current; // Sum of squared currents
+    delay(1); // Short delay for stability
+  }
+  float rmsCurrent = sqrt(currentSum / samples); // RMS value
+  return rmsCurrent;
+}
+
+// Function to measure vibration
+float measureVibration() {
+  int sensorValue = analogRead(vibrationSensorPin);
+  float voltage = sensorValue * V_REF; // Convert ADC value to voltage
+  return voltage; // Return voltage as vibration level
+}
+
+void loop() {
+  if (digitalRead(button1Pin) == LOW) { // Case 1: Measure current only
+    relayState = true;
+    digitalWrite(relayPin, HIGH); // Turn on relay
+    Serial.println("Relay is ON");
+
+    // Measure AC current
+    float current = measureCurrentAC();
+    float cc = current - 14.27;
+    Serial.print("Current: ");
+    Serial.print(cc, 2); // Print with 2 decimal places
+    Serial.println(" A");
+
+    if (cc > CURRENT_THRESHOLD) {
+      sendEmailAlert("Alert: Exhibit ID " + String(exhibitID) + " - Current exceeds threshold: " + String(cc, 2) + " A");
+    }
+
+    delay(15000); // Wait for 15 seconds
+
+    digitalWrite(relayPin, LOW); // Turn off relay
+    relayState = false;
+    Serial.println("Relay is OFF");
+  }
+
+  if (digitalRead(button2Pin) == LOW) { // Case 2: Measure current and vibration
+    relayState = true;
+    digitalWrite(relayPin, HIGH); // Turn on relay
+    Serial.println("Relay is ON");
+
+    // Measure AC current
+    float current = measureCurrentAC();
+    float cc = current - 14.27;
+    Serial.print("Current: ");
+    Serial.print(cc, 2); // Print with 2 decimal places
+    Serial.println(" A");
+
+    // Measure vibration
+    float vibration = measureVibration();
+    Serial.print("Vibration: ");
+    Serial.print(vibration, 2); // Print with 2 decimal places
+    Serial.println(" V");
+
+    if (cc > CURRENT_THRESHOLD || vibration > VIBRATION_THRESHOLD) {
+      sendEmailAlert("Alert: Maintenance required for Exhibit ID " + String(exhibitID) + " - Current: " + String(cc, 2) + " A, Vibration: " + String(vibration, 2) + " V");
+    }
+
+    delay(15000); // Wait for 15 seconds
+
+    digitalWrite(relayPin, LOW); // Turn off relay
+    relayState = false;
+    Serial.println("Relay is OFF");
+  }
+
+  // Ensure relay is off if no button is pressed
+  if (!relayState) {
+    digitalWrite(relayPin, LOW);
+  }
+
+  // Wait before the next loop iteration
+  delay(100);
+}
+
+void sendEmailAlert(String alertMessage) {
+  ESP_Mail_Session session;
+
+  session.server.host_name = SMTP_server;
+  session.server.port = SMTP_Port;
+  session.login.email = sender_email;
+  session.login.password = sender_password;
+  session.login.user_domain = "";
+
+  SMTP_Message message;
+  message.sender.name = "ESP32";
+  message.sender.email = sender_email;
+  message.subject = "ESP32 Alert";
+  message.addRecipient("", Recipient_email_1);
+  message.addRecipient("", Recipient_email_2);
+  message.addRecipient("", Recipient_email_3);
+  message.addRecipient("", Recipient_email_4);
+  message.addRecipient("", Recipient_email_5);
+  message.addRecipient("", Recipient_email_6);
+
+  message.text.content = alertMessage.c_str();
+  message.text.charSet = "us-ascii";
+  message.text.transfer_encoding = Content_Transfer_Encoding::enc_7bit;
+
+  if (!smtp.connect(&session))
+    return;
+
+  if (!MailClient.sendMail(&smtp, &message))
+    Serial.println("Error sending Email, " + smtp.errorReason());
+}
